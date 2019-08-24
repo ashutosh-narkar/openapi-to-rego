@@ -14,7 +14,7 @@ The `examples` directory contains samples of OpenAPI 3.0 specification in YAML a
 $ ./openapi-to-rego examples/petstore.yaml
 ```
 
-This will generate the Rego code for the OAS defined in `examples/petstore.yaml`. The generated Rego code will be wrtitten to a file `policy.rego`. 
+This will generate the Rego code for the OAS defined in `examples/petstore.yaml`. The generated Rego code will be written to a file `policy.rego`.
 
 To specify a different file to output the Rego code, use the `--output-filename` flag.
 
@@ -103,6 +103,6 @@ allow = true {
 
 Since only one of the security requirement objects needs to be satisfied to authorize a request, there are two `allow` rules for the `post` operation object on `/pets`.
 
-In the last `allow` rule, corresponding to the `/pets/{petId}` path object, the `petId` is a variable in the expression `input.path = ["pets", petId]` whose value will be bound to a value provided to the policy as `input`.
+In the last `allow` rule, corresponding to the `/pets/{petId}` path object, the `petId` is a variable in the expression `input.path = ["pets", petId]` whose value will be bound to a value in the `input` that is provided to the policy.
 
 The policy also expects a `token` to be provided in the input to verify the security requirements.
