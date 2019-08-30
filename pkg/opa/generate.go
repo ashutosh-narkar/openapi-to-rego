@@ -2,8 +2,10 @@ package opa
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -14,11 +16,22 @@ var (
 	pathParamRE = regexp.MustCompile("{[.;?]?([^{}*]+)\\*?}")
 )
 
+const oasExtensionKey = "x-filter"
+
 var regoTemplate = `package %s
 default allow = false
 
-token = {"payload": payload} { io.jwt.decode(input.token, [_, payload, _]) }
-{{range .}}
+token = {"payload": payload} { io.jwt.decode(input.token, [_, payload, _]) }{{range .}}
+{{ if .MaskFields }}
+filter = {{.MaskFields}} {
+  input.path = {{.Path}}
+  input.method = {{.Method}}
+  {{- with .Scopes}}
+  {{- range .}}
+  token.payload.claims["{{.}}"]
+  {{- end}}
+  {{- end}}
+}{{else}}
 allow = true {
   input.path = {{.Path}}
   input.method = {{.Method}}
@@ -26,16 +39,18 @@ allow = true {
   {{- range .}}
   token.payload.claims["{{.}}"]
   {{- end}}
-  {{- end}}	
-}
-{{end}}`
+  {{- end}}
+}{{ end }}{{end}}`
 
 // PolicySchema defines the policy to generate
 type PolicySchema struct {
-	Path   string
-	Method string
-	Scopes []string
+	Path       string
+	Method     string
+	Scopes     []string
+	MaskFields string
 }
+
+type extensionDefinition map[string][]string
 
 // Generate generates the Rego policy given a OpenAPI 3 spec
 func Generate(swagger *openapi3.Swagger, packageName string) (string, error) {
@@ -44,28 +59,90 @@ func Generate(swagger *openapi3.Swagger, packageName string) (string, error) {
 
 	for path, item := range swagger.Paths {
 		for method, operation := range item.Operations() {
-			if operation.Security != nil {
-				for _, req := range *operation.Security {
-					for _, scopes := range req {
+
+			// check for "x-filter" extension
+			if operation.ExtensionProps.Extensions[oasExtensionKey] != nil {
+
+				// security requirement object needs to exist as the "x-filter"
+				// extension references it
+				if operation.Security == nil {
+					return "", fmt.Errorf("OpenAPI spec does not specify a Security Requirement Object")
+				}
+
+				securitySchemes := getSecuritySchemes(operation.Security)
+
+				data, ok := operation.ExtensionProps.Extensions[oasExtensionKey].(json.RawMessage)
+				if !ok {
+					return "", fmt.Errorf("OpenAPI extensions: type assertion error")
+				}
+				var extensionDefinitions []extensionDefinition
+				err := json.Unmarshal(data, &extensionDefinitions)
+				if err != nil {
+					return "", err
+				}
+
+				for _, extensionDefinition := range extensionDefinitions {
+					for schemeName, maskFields := range extensionDefinition {
+
+						var scopes []string
+						var ok bool
+						if scopes, ok = securitySchemes[schemeName]; !ok {
+							return "", fmt.Errorf("Unknown security scheme %v in OpenAPI extension", schemeName)
+						}
+
 						schema := PolicySchema{
-							Path:   convertOASPathToParsedPath(path),
-							Method: fmt.Sprintf("\"%s\"", method),
-							Scopes: scopes,
+							Path:       convertOASPathToParsedPath(path),
+							Method:     strconv.Quote(method),
+							Scopes:     scopes,
+							MaskFields: getFormattedMaskFields(maskFields),
 						}
 						schemas = append(schemas, schema)
 					}
 				}
+
 			} else {
-				schema := PolicySchema{
-					Path:   convertOASPathToParsedPath(path),
-					Method: fmt.Sprintf("\"%s\"", method),
+				if operation.Security != nil {
+					securitySchemes := getSecuritySchemes(operation.Security)
+					for _, scopes := range securitySchemes {
+						schema := PolicySchema{
+							Path:   convertOASPathToParsedPath(path),
+							Method: strconv.Quote(method),
+							Scopes: scopes,
+						}
+						schemas = append(schemas, schema)
+					}
+				} else {
+					schema := PolicySchema{
+						Path:   convertOASPathToParsedPath(path),
+						Method: strconv.Quote(method),
+					}
+					schemas = append(schemas, schema)
 				}
-				schemas = append(schemas, schema)
 			}
 		}
 	}
 
 	return generateRego(schemas, packageName)
+}
+
+func getSecuritySchemes(secReqs *openapi3.SecurityRequirements) map[string][]string {
+	securitySchemesMap := make(map[string][]string)
+	for _, req := range *secReqs {
+		for scheme, scopes := range req {
+			securitySchemesMap[scheme] = scopes
+		}
+	}
+	return securitySchemesMap
+}
+
+func getFormattedMaskFields(maskFields []string) string {
+	result := make([]string, len(maskFields))
+
+	for i := range maskFields {
+		result[i] = strconv.Quote(maskFields[i])
+	}
+
+	return fmt.Sprintf("[%v]", strings.Join(result, ","))
 }
 
 func generateRego(schemas []PolicySchema, packageName string) (string, error) {
