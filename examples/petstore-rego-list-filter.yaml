@@ -30,7 +30,7 @@ paths:
               schema:
                 type: string
           content:
-            application/json:    
+            application/json:
               schema:
                 $ref: "#/components/schemas/Pets"
         default:
@@ -61,13 +61,38 @@ paths:
         - type:apiKey
         - name:api_key
         - in:header
-      x-filter:
+      x-security-rego-field-filter:
       - petstore_auth:
         - name
         - ssn
       - api_key:
         - birthdate
         - ssn
+      x-security-rego-list-filter:
+      - source: list
+        operations:
+        - eq:
+          - owner
+          - token.payload.username
+      - source: list
+        operations:
+        - membership:
+          - owner
+          - token.payload.dependents
+        - lt:
+          - age
+          - 18
+      - source: list
+        operations:
+        - membership:
+          - owner
+          - token.payload.dependents
+        - gte:
+          - age
+          - 18
+        - eq:
+          - signedWaiver
+          - true
   /pets/{petId}:
     get:
       summary: Info for a specific pet

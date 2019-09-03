@@ -13,16 +13,30 @@ import (
 )
 
 var (
-	pathParamRE = regexp.MustCompile("{[.;?]?([^{}*]+)\\*?}")
+	pathParamRE    = regexp.MustCompile("{[.;?]?([^{}*]+)\\*?}")
+	opNameToSymbol = map[string]string{
+		"eq":         " = ",
+		"lt":         " < ",
+		"gte":        " >= ",
+		"membership": " = ",
+	}
 )
 
-const oasExtensionKey = "x-filter"
+const (
+	// OAS Extension to generate a Rego rule that returns list of field names in an object to filter
+	oasSecExtRegoFieldFilter = "x-security-rego-field-filter"
+
+	// OAS Extension to generate a Rego rule that returns a filtered list of objects
+	oasSecExtRegoListFilter = "x-security-rego-list-filter"
+
+	tokenPrefix = "token"
+)
 
 var regoTemplate = `package %s
 default allow = false
 
-token = {"payload": payload} { io.jwt.decode(input.token, [_, payload, _]) }{{range .}}
-{{ if .MaskFields }}
+token = {"payload": payload} { io.jwt.decode(input.token, [_, payload, _]) }{{range .}}{{ if .MaskFields }}
+
 filter = {{.MaskFields}} {
   input.path = {{.Path}}
   input.method = {{.Method}}
@@ -31,7 +45,17 @@ filter = {{.MaskFields}} {
   token.payload.claims["{{.}}"]
   {{- end}}
   {{- end}}
+}{{ end }}{{if .ListFilter}}
+
+list_filter[x] {
+  input.{{.ListFilter.Source}}[x]
+  {{- with .ListFilter.Expressions}}
+  {{- range .}}
+  {{.}}
+  {{- end}}
+  {{- end}}
 }{{else}}
+
 allow = true {
   input.path = {{.Path}}
   input.method = {{.Method}}
@@ -40,7 +64,7 @@ allow = true {
   token.payload.claims["{{.}}"]
   {{- end}}
   {{- end}}
-}{{ end }}{{end}}`
+}{{end}}{{end}}`
 
 // PolicySchema defines the policy to generate
 type PolicySchema struct {
@@ -48,7 +72,17 @@ type PolicySchema struct {
 	Method     string
 	Scopes     []string
 	MaskFields string
+	ListFilter *policySchemaListFilter
 }
+
+// policySchemaListFilter defines the policy to generate for a list filter
+type policySchemaListFilter struct {
+	Source      string
+	Operations  []operation
+	Expressions []string
+}
+
+type operation map[string][]interface{}
 
 type extensionDefinition map[string][]string
 
@@ -60,10 +94,10 @@ func Generate(swagger *openapi3.Swagger, packageName string) (string, error) {
 	for path, item := range swagger.Paths {
 		for method, operation := range item.Operations() {
 
-			// check for "x-filter" extension
-			if operation.ExtensionProps.Extensions[oasExtensionKey] != nil {
+			// check for "x-security-rego-field-filter" extension
+			if val, ok := operation.ExtensionProps.Extensions[oasSecExtRegoFieldFilter]; ok {
 
-				// security requirement object needs to exist as the "x-filter"
+				// security requirement object needs to exist as the "x-security-rego-field-filter"
 				// extension references it
 				if operation.Security == nil {
 					return "", fmt.Errorf("OpenAPI spec does not specify a Security Requirement Object")
@@ -71,7 +105,7 @@ func Generate(swagger *openapi3.Swagger, packageName string) (string, error) {
 
 				securitySchemes := getSecuritySchemes(operation.Security)
 
-				data, ok := operation.ExtensionProps.Extensions[oasExtensionKey].(json.RawMessage)
+				data, ok := val.(json.RawMessage)
 				if !ok {
 					return "", fmt.Errorf("OpenAPI extensions: type assertion error")
 				}
@@ -99,9 +133,73 @@ func Generate(swagger *openapi3.Swagger, packageName string) (string, error) {
 						schemas = append(schemas, schema)
 					}
 				}
+			}
 
+			// check for "x-security-rego-list-filter" extension
+			if val, ok := operation.ExtensionProps.Extensions[oasSecExtRegoListFilter]; ok {
+				data, ok := val.(json.RawMessage)
+				if !ok {
+					return "", fmt.Errorf("OpenAPI extensions: type assertion error")
+				}
+
+				var policySchemaListFilters []policySchemaListFilter
+				err := json.Unmarshal(data, &policySchemaListFilters)
+				if err != nil {
+					return "", err
+				}
+
+				for _, p := range policySchemaListFilters {
+					expressions := []string{}
+					for _, operation := range p.Operations {
+						for op, operands := range operation {
+							expression := []string{}
+							for _, operand := range operands {
+								switch val := operand.(type) {
+								case string:
+									if !strings.HasPrefix(val, tokenPrefix) {
+										val = fmt.Sprintf("x.%v", val)
+									} else {
+										if op == "membership" {
+											val = fmt.Sprintf("%v[_]", val)
+										}
+									}
+									expression = append(expression, val)
+								case bool:
+									expression = append(expression, strconv.FormatBool(val))
+								case int64:
+									expression = append(expression, strconv.FormatInt(val, 10))
+								case float64:
+									expression = append(expression, strconv.FormatInt(int64(val), 10))
+								default:
+									return "", fmt.Errorf("illegal type for operand: %T", val)
+								}
+							}
+							expressions = append(expressions, strings.Join(expression, opNameToSymbol[op]))
+						}
+					}
+					listFilter := policySchemaListFilter{
+						Source:      p.Source,
+						Expressions: expressions,
+					}
+
+					schema := PolicySchema{
+						Path:       convertOASPathToParsedPath(path),
+						Method:     strconv.Quote(method),
+						ListFilter: &listFilter,
+					}
+					schemas = append(schemas, schema)
+				}
+			}
+
+			// generate boolean rules
+			if operation.Security == nil {
+				schema := PolicySchema{
+					Path:   convertOASPathToParsedPath(path),
+					Method: strconv.Quote(method),
+				}
+				schemas = append(schemas, schema)
 			} else {
-				if operation.Security != nil {
+				if _, ok := operation.ExtensionProps.Extensions[oasSecExtRegoFieldFilter]; !ok {
 					securitySchemes := getSecuritySchemes(operation.Security)
 					for _, scopes := range securitySchemes {
 						schema := PolicySchema{
@@ -111,14 +209,9 @@ func Generate(swagger *openapi3.Swagger, packageName string) (string, error) {
 						}
 						schemas = append(schemas, schema)
 					}
-				} else {
-					schema := PolicySchema{
-						Path:   convertOASPathToParsedPath(path),
-						Method: strconv.Quote(method),
-					}
-					schemas = append(schemas, schema)
 				}
 			}
+
 		}
 	}
 
