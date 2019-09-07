@@ -29,7 +29,12 @@ const (
 	// OAS Extension to generate a Rego rule that returns a filtered list of objects
 	oasSecExtRegoListFilter = "x-security-rego-list-filter"
 
+	// OAS Extension to generate a Rego rule that overwrites value of a field in an object
+	oasSecExtRegoOverwriteFilter = "x-security-rego-overwrite-filter"
+
 	tokenPrefix = "token"
+
+	helperRuleName = "allow"
 )
 
 var regoTemplate = `package %s
@@ -42,7 +47,7 @@ filter = {{.MaskFields}} {
   input.method = {{.Method}}
   {{- with .Scopes}}
   {{- range .}}
-  token.payload.claims["{{.}}"]
+  token.payload.scopes["{{.}}"]
   {{- end}}
   {{- end}}
 }{{ end }}{{if .ListFilter}}
@@ -54,25 +59,48 @@ list_filter[x] {
   {{.}}
   {{- end}}
   {{- end}}
+}{{else if .OverwriteFilter}}
+{{if eq .OverwriteFilter.Negated true}}
+response["{{.OverwriteFilter.Field}}"] = {{.OverwriteFilter.Value}} {
+	not {{.OverwriteFilter.HelperRuleName}}
+}
+
+response["{{.OverwriteFilter.Field}}"] = input.object.{{.OverwriteFilter.Field}} {
+	{{.OverwriteFilter.HelperRuleName}}
 }{{else}}
+response["{{.OverwriteFilter.Field}}"] = {{.OverwriteFilter.Value}} {
+	{{.OverwriteFilter.HelperRuleName}}
+}
+
+response["{{.OverwriteFilter.Field}}"] = input.object.{{.OverwriteFilter.Field}} {
+	not {{.OverwriteFilter.HelperRuleName}}
+}{{end}}{{ $helper := .OverwriteFilter.HelperRuleName }}
+{{range .OverwriteFilter.Expressions}}
+{{$helper}} = true {
+{{- range .}}
+  {{.}}
+{{- end}}
+}
+{{end}}{{else}}
 
 allow = true {
   input.path = {{.Path}}
   input.method = {{.Method}}
   {{- with .Scopes}}
   {{- range .}}
-  token.payload.claims["{{.}}"]
+  token.payload.scopes["{{.}}"]
   {{- end}}
   {{- end}}
 }{{end}}{{end}}`
 
 // PolicySchema defines the policy to generate
 type PolicySchema struct {
-	Path       string
-	Method     string
-	Scopes     []string
-	MaskFields string
-	ListFilter *policySchemaListFilter
+	Path            string
+	Method          string
+	Scopes          []string
+	MaskFields      string
+	ListFilter      *policySchemaListFilter
+	OverwriteFilter *policySchemaOverwriteFilter
 }
 
 // policySchemaListFilter defines the policy to generate for a list filter
@@ -80,6 +108,20 @@ type policySchemaListFilter struct {
 	Source      string
 	Operations  []operation
 	Expressions []string
+}
+
+// policySchemaOverwriteFilter defines the policy to generate for a overwrite filter
+type policySchemaOverwriteFilter struct {
+	Field          string
+	Value          interface{}
+	Negated        bool
+	Rules          []rule
+	HelperRuleName string
+	Expressions    [][]string
+}
+
+type rule struct {
+	Operations []operation
 }
 
 type operation map[string][]interface{}
@@ -186,6 +228,74 @@ func Generate(swagger *openapi3.Swagger, packageName string) (string, error) {
 						Path:       convertOASPathToParsedPath(path),
 						Method:     strconv.Quote(method),
 						ListFilter: &listFilter,
+					}
+					schemas = append(schemas, schema)
+				}
+			}
+
+			// check for "x-security-rego-overwrite-filter" extension
+			if val, ok := operation.ExtensionProps.Extensions[oasSecExtRegoOverwriteFilter]; ok {
+				data, ok := val.(json.RawMessage)
+				if !ok {
+					return "", fmt.Errorf("OpenAPI extensions: type assertion error")
+				}
+
+				var policySchemaOverwriteFilters []policySchemaOverwriteFilter
+				err := json.Unmarshal(data, &policySchemaOverwriteFilters)
+				if err != nil {
+					return "", err
+				}
+
+				for i, p := range policySchemaOverwriteFilters {
+					ruleExpressions := [][]string{}
+					for _, rule := range p.Rules {
+						expressions := []string{}
+						for _, operation := range rule.Operations {
+							for op, operands := range operation {
+								expression := []string{}
+								for _, operand := range operands {
+									switch val := operand.(type) {
+									case string:
+										if !strings.HasPrefix(val, tokenPrefix) && !strings.HasPrefix(val, "\"") {
+											val = fmt.Sprintf("input.object.%v", val)
+										} else {
+											if op == "membership" {
+												val = fmt.Sprintf("%v[_]", val)
+											}
+										}
+										expression = append(expression, val)
+									case bool:
+										expression = append(expression, strconv.FormatBool(val))
+									case int64:
+										expression = append(expression, strconv.FormatInt(val, 10))
+									case float64:
+										expression = append(expression, strconv.FormatInt(int64(val), 10))
+									default:
+										return "", fmt.Errorf("illegal type for operand: %T", val)
+									}
+								}
+								expressions = append(expressions, strings.Join(expression, opNameToSymbol[op]))
+							}
+						}
+						ruleExpressions = append(ruleExpressions, expressions)
+					}
+
+					if p.Value == nil {
+						p.Value = "null"
+					}
+
+					overwriteFilter := policySchemaOverwriteFilter{
+						Field:          p.Field,
+						Value:          p.Value,
+						Negated:        p.Negated,
+						HelperRuleName: fmt.Sprintf("%v%v", helperRuleName, i+1),
+						Expressions:    ruleExpressions,
+					}
+
+					schema := PolicySchema{
+						Path:            convertOASPathToParsedPath(path),
+						Method:          strconv.Quote(method),
+						OverwriteFilter: &overwriteFilter,
 					}
 					schemas = append(schemas, schema)
 				}

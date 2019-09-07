@@ -85,16 +85,16 @@ allow = true {
 allow = true {
   input.path = ["pets"]
   input.method = "POST"
-  token.payload.claims["write:pets"]
-  token.payload.claims["read:pets"]
+  token.payload.scopes["write:pets"]
+  token.payload.scopes["read:pets"]
 }
 
 allow = true {
   input.path = ["pets"]
   input.method = "POST"
-  token.payload.claims["type:apiKey"]
-  token.payload.claims["name:api_key"]
-  token.payload.claims["in:header"]
+  token.payload.scopes["type:apiKey"]
+  token.payload.scopes["name:api_key"]
+  token.payload.scopes["in:header"]
 }
 
 allow = true {
@@ -156,31 +156,31 @@ token = {"payload": payload} { io.jwt.decode(input.token, [_, payload, _]) }
 filter = ["name","ssn"] {
   input.path = ["pets"]
   input.method = "POST"
-  token.payload.claims["write:pets"]
-  token.payload.claims["read:pets"]
+  token.payload.scopes["write:pets"]
+  token.payload.scopes["read:pets"]
 }
 
 allow = true {
   input.path = ["pets"]
   input.method = "POST"
-  token.payload.claims["write:pets"]
-  token.payload.claims["read:pets"]
+  token.payload.scopes["write:pets"]
+  token.payload.scopes["read:pets"]
 }
 
 filter = ["birthdate","ssn"] {
   input.path = ["pets"]
   input.method = "POST"
-  token.payload.claims["type:apiKey"]
-  token.payload.claims["name:api_key"]
-  token.payload.claims["in:header"]
+  token.payload.scopes["type:apiKey"]
+  token.payload.scopes["name:api_key"]
+  token.payload.scopes["in:header"]
 }
 
 allow = true {
   input.path = ["pets"]
   input.method = "POST"
-  token.payload.claims["type:apiKey"]
-  token.payload.claims["name:api_key"]
-  token.payload.claims["in:header"]
+  token.payload.scopes["type:apiKey"]
+  token.payload.scopes["name:api_key"]
+  token.payload.scopes["in:header"]
 }
 ```
 
@@ -290,16 +290,16 @@ list_filter[x] {
 allow = true {
   input.path = ["pets"]
   input.method = "POST"
-  token.payload.claims["write:pets"]
-  token.payload.claims["read:pets"]
+  token.payload.scopes["write:pets"]
+  token.payload.scopes["read:pets"]
 }
 
 allow = true {
   input.path = ["pets"]
   input.method = "POST"
-  token.payload.claims["type:apiKey"]
-  token.payload.claims["name:api_key"]
-  token.payload.claims["in:header"]
+  token.payload.scopes["type:apiKey"]
+  token.payload.scopes["name:api_key"]
+  token.payload.scopes["in:header"]
 }
 ```
 For each item in `x-security-rego-list-filter`, a corresponding `list_filter` rule is created with conditions extracted from the `operations` field specified in an `x-security-rego-list-filter` item. These conditions are then applied on each item in `input.list` which is list of objects to filter and is provided to OPA as input.
@@ -313,3 +313,137 @@ To see this example, run:
 ```bash
 $ ./openapi-to-rego examples/petstore-rego-list-filter.yaml -p example
 ```
+
+### Generating Overwrite Rules
+
+`openapi-to-rego` defines the `x-security-rego-overwrite-filter` filter extension for scenarios where the value of a field in an object needs to be overwritten based on conditions that may be specified in the OAS. These conditions could be based on the values in the input object itself or in the token provided to OPA etc.
+
+The `field` key in the `x-security-rego-overwrite-filter` filter extension specifies the name of a field in the input object whose value needs to be overwritten to the value specified in the `value` key of the extension based on conditions specified in the `rules` field.
+
+The generated Rego policy returns an object with a key equal to the value of the `field` key in the extension and value equal to the `value` key of the extension or the existing value of the `field` key in the input object.
+
+Each item in the `rules` object, specifies a new helper rule in the Rego policy while each operation specified in `operations` determines the expressions to be included in the rule body.
+
+The following operations are supported:
+
+| Symbol   |      Name      |  Description |
+|----------|-------------|------|
+| eq |  Equality | operand_1 is equal to operand_2 |
+| lt |  Less than | operand_1 is less than operand_2 |
+| gte |  Greater than or equal to | operand_1 is greater than or equal to operand_2 |
+| membership |  Membership | operand_2 includes operand_1 |
+
+The `negate` key controls how the results from the helper rules, apply towards asssignment of the final value for the `field` key in the result returned by OPA.
+
+```yaml
+paths:
+  /pets:
+    post:
+      summary: Create a pet
+      operationId: createPets
+      tags:
+        - pets
+      security:
+      - petstore_auth:
+        - write:pets
+        - read:pets
+      x-security-rego-overwrite-filter:
+      - field: enrolleeClaimSummaryList
+        value: null
+        negated: true
+        rules:
+        - operations:
+          - eq:
+            - token.payload.enrollee_type
+            - '"primary"'
+          - lt:
+            - enrolleeAge
+            - 18
+        - operations:
+          - eq:
+            - token.payload.enrollee_idd
+            - enrolleeId
+          - gte:
+            - age
+            - 18
+          - eq:
+            - enrolleeSignedWaiver
+            - true
+      - field: enrolleeList
+        value: hello
+        negated: false
+        rules:
+        - operations:
+          - eq:
+            - token.payload.enrollee_type
+            - '"secondary"'
+          - lt:
+            - enrolleeAge
+            - 18
+        - operations:
+          - membership:
+            - owner
+            - token.payload.dependents
+          - gte:
+            - age
+            - 18
+          - eq:
+            - enrolleeSignedWaiver
+            - true
+```
+
+The generated Rego for the above OAS would look like below:
+
+```ruby
+package example
+default allow = false
+
+token = {"payload": payload} { io.jwt.decode(input.token, [_, payload, _]) }
+
+response["enrolleeClaimSummaryList"] = null {
+	not allow1
+}
+
+response["enrolleeClaimSummaryList"] = input.object.enrolleeClaimSummaryList {
+	allow1
+}
+
+allow1 = true {
+  token.payload.enrollee_type = "primary"
+  input.object.enrolleeAge < 18
+}
+
+allow1 = true {
+  token.payload.enrollee_idd = input.object.enrolleeId
+  input.object.age >= 18
+  input.object.enrolleeSignedWaiver = true
+}
+
+response["enrolleeList"] = hello {
+	allow2
+}
+
+response["enrolleeList"] = input.object.enrolleeList {
+	not allow2
+}
+
+allow2 = true {
+  token.payload.enrollee_type = "secondary"
+  input.object.enrolleeAge < 18
+}
+
+allow2 = true {
+  input.object.owner = token.payload.dependents[_]
+  input.object.age >= 18
+  input.object.enrolleeSignedWaiver = true
+}
+
+allow = true {
+  input.path = ["pets"]
+  input.method = "POST"
+  token.payload.claims["write:pets"]
+  token.payload.claims["read:pets"]
+}
+```
+
+The `response` rule returns the final value for the `field` key specified in the extension. Notice how the value for `enrolleeClaimSummaryList` is set to `null` (ie. `value` key from the extension) when `allow1` is **NOT** `true` while for `enrolleeList` it is set to `hello` (ie. `value` key from the extension) when `allow2` is `true`. This behaviour is controlled by the `negate` field in the extension.
