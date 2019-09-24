@@ -270,18 +270,24 @@ default allow = false
 token = {"payload": payload} { io.jwt.decode(input.token, [_, payload, _]) }
 
 list_filter[x] {
-  input.list[x]
+  input.path = ["pets"]
+  input.method = "POST"
+  x := input.list[_]
   x.owner = token.payload.username
 }
 
 list_filter[x] {
-  input.list[x]
+  input.path = ["pets"]
+  input.method = "POST"
+  x := input.list[_]
   x.owner = token.payload.members[_]
   x.age < 18
 }
 
 list_filter[x] {
-  input.list[x]
+  input.path = ["pets"]
+  input.method = "POST"
+  x := input.list[_]
   x.owner = token.payload.members[_]
   x.age >= 18
   x.hasHouseKey = true
@@ -409,11 +415,15 @@ response["enrolleeClaimSummaryList"] = input.object.enrolleeClaimSummaryList {
 }
 
 allow1 = true {
+  input.path = ["pets"]
+  input.method = "POST"
   token.payload.enrollee_type = "primary"
   input.object.enrolleeAge < 18
 }
 
 allow1 = true {
+  input.path = ["pets"]
+  input.method = "POST"
   token.payload.enrollee_idd = input.object.enrolleeId
   input.object.age >= 18
   input.object.enrolleeSignedWaiver = true
@@ -428,11 +438,15 @@ response["enrolleeList"] = input.object.enrolleeList {
 }
 
 allow2 = true {
+  input.path = ["pets"]
+  input.method = "POST"
   token.payload.enrollee_type = "secondary"
   input.object.enrolleeAge < 18
 }
 
 allow2 = true {
+  input.path = ["pets"]
+  input.method = "POST"
   input.object.owner = token.payload.dependents[_]
   input.object.age >= 18
   input.object.enrolleeSignedWaiver = true
@@ -447,3 +461,9 @@ allow = true {
 ```
 
 The `response` rule returns the final value for the `field` key specified in the extension. Notice how the value for `enrolleeClaimSummaryList` is set to `null` (ie. `value` key from the extension) when `allow1` is **NOT** `true` while for `enrolleeList` it is set to `hello` (ie. `value` key from the extension) when `allow2` is `true`. This behaviour is controlled by the `negate` field in the extension.
+
+To see this example, run:
+
+```bash
+$ ./openapi-to-rego examples/petstore-rego-overwrite-filter.yaml -p example
+```

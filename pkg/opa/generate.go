@@ -53,7 +53,9 @@ filter = {{.MaskFields}} {
 }{{ end }}{{if .ListFilter}}
 
 list_filter[x] {
-  input.{{.ListFilter.Source}}[x]
+  input.path = {{.Path}}
+  input.method = {{.Method}}
+  x := input.{{.ListFilter.Source}}[_]
   {{- with .ListFilter.Expressions}}
   {{- range .}}
   {{.}}
@@ -62,21 +64,23 @@ list_filter[x] {
 }{{else if .OverwriteFilter}}
 {{if eq .OverwriteFilter.Negated true}}
 response["{{.OverwriteFilter.Field}}"] = {{.OverwriteFilter.Value}} {
-	not {{.OverwriteFilter.HelperRuleName}}
+    not {{.OverwriteFilter.HelperRuleName}}
 }
 
 response["{{.OverwriteFilter.Field}}"] = input.object.{{.OverwriteFilter.Field}} {
-	{{.OverwriteFilter.HelperRuleName}}
+    {{.OverwriteFilter.HelperRuleName}}
 }{{else}}
 response["{{.OverwriteFilter.Field}}"] = {{.OverwriteFilter.Value}} {
-	{{.OverwriteFilter.HelperRuleName}}
+    {{.OverwriteFilter.HelperRuleName}}
 }
 
 response["{{.OverwriteFilter.Field}}"] = input.object.{{.OverwriteFilter.Field}} {
-	not {{.OverwriteFilter.HelperRuleName}}
-}{{end}}{{ $helper := .OverwriteFilter.HelperRuleName }}
+    not {{.OverwriteFilter.HelperRuleName}}
+}{{end}}{{ $helper := .OverwriteFilter.HelperRuleName }} {{$path := .Path}} {{$method := .Method}}
 {{range .OverwriteFilter.Expressions}}
 {{$helper}} = true {
+  input.path = {{$path}}
+  input.method = {{$method}}
 {{- range .}}
   {{.}}
 {{- end}}

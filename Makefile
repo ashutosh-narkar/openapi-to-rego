@@ -4,6 +4,10 @@ all: build check
 build:
 	go build ./cmd/openapi-to-rego/...
 
+.PHONY: install
+install:
+	go install ./cmd/openapi-to-rego/...
+
 .PHONY: check
 check: check-fmt check-vet check-lint
 
