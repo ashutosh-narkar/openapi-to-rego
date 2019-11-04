@@ -26,93 +26,84 @@ Run `./openapi-to-rego --help` for more details.
 
 ### Generating Boolean Rules
 
-`openapi-to-rego` looks at the [Paths Object](https://github.com/OAI/OpenAPI-Specification/blob/OpenAPI.next/versions/3.0.0.md#paths-object), [Operation Object](https://github.com/OAI/OpenAPI-Specification/blob/OpenAPI.next/versions/3.0.0.md#operationObject) and [Security Requirement Object](https://github.com/OAI/OpenAPI-Specification/blob/OpenAPI.next/versions/3.0.0.md#securityRequirementObject) in the OpenAPI 3.0 specification file to generate the Rego policy.
+`openapi-to-rego` leverages the [Extensions Object](https://github.com/OAI/OpenAPI-Specification/blob/master/versions/3.0.0.md#specification-extensions) in the OpenAPI 3.0 specification to generate Rego rules that return boolean values. The `x-security-rego-boolean-filter` extension serves this purpose.
 
-The example below has two path objects namely `/pets` and `/pets/{petId}`. `/pets` has two operation objects `get` and `post` while `/pets/{petId}` has `get`. 
+Tha value for the `x-security-rego-boolean-filter` is a list of rules with conditions which are then included in the body of the resulting Rego rule.
 
-Additionally the `post` operation object on `/pets` has two security requirement objects `petstore_auth` and `api_key`.
+In the example below, the value returned by the generated Rego rule, depends on the  conditions specified in the `rules` field.
+
+Each item in the `rules` object, specifies a new rule in the Rego policy while each operation specified in `operations` determines the expressions to be included in the rule body.
+
+The following operations are supported:
+
+| Symbol   |      Name      |  Description |
+|----------|-------------|------|
+| eq |  Equality | operand_1 is equal to operand_2 |
+| lt |  Less than | operand_1 is less than operand_2 |
+| gte |  Greater than or equal to | operand_1 is greater than or equal to operand_2 |
+| membership |  Membership | operand_2 includes operand_1 |
 
 ```yaml
 paths:
-  /pets:
-    get:
-      summary: List all pets
-      operationId: listPets
-      tags:
-        - pets
-      parameters:
-        - name: limit
-          in: query
-          description: How many items to return at one time (max 100)
-          required: false
-          schema:
-            type: integer
-            format: int32
-    post:
-      summary: Create a pet
-      operationId: createPets
-      tags:
-        - pets
-      security:
-      - petstore_auth:
-        - write:pets
-        - read:pets
-      - api_key:
-        - type:apiKey
-        - name:api_key
-        - in:header
   /pets/{petId}:
     get:
       summary: Info for a specific pet
       operationId: showPetById
       tags:
         - pets
+      x-security-rego-boolean-filter:
+      - rules:
+        - operations:
+          - eq:
+            - $petId
+            - token.payload.pets[_].petId
+          - eq:
+            - input.owner
+            - token.payload.pets.owners[_]
+        - operations:
+          - eq:
+            - $petId
+            - token.payload.pets[_].petIdSmall
+          - eq:
+            - input.owner
+            - token.payload.pets.owners_small[_]
 ```
 
 The generated Rego for the above OAS would look like below:
 
 ```rego
-package httpapi.authz
+package example
 default allow = false
 
 token = {"payload": payload} { io.jwt.decode(input.token, [_, payload, _]) }
 
+
 allow = true {
-  input.path = ["pets"]
+  input.path = ["pets", petId]
   input.method = "GET"
-}
-
-allow = true {
-  input.path = ["pets"]
-  input.method = "POST"
-  token.payload.scopes["write:pets"]
-  token.payload.scopes["read:pets"]
-}
-
-allow = true {
-  input.path = ["pets"]
-  input.method = "POST"
-  token.payload.scopes["type:apiKey"]
-  token.payload.scopes["name:api_key"]
-  token.payload.scopes["in:header"]
+  petId = token.payload.pets[_].petId
+  input.owner = token.payload.pets.owners[_]
 }
 
 allow = true {
   input.path = ["pets", petId]
   input.method = "GET"
+  petId = token.payload.pets[_].petIdSmall
+  input.owner = token.payload.pets.owners_small[_]
 }
 ```
 
-Since only one of the security requirement objects needs to be satisfied to authorize a request, there are two `allow` rules for the `post` operation object on `/pets`.
+In the `allow` rules, corresponding to the `/pets/{petId}` path object, the `petId` is a variable in the expression `input.path = ["pets", petId]` whose value will be bound to a value in the `input` that is provided to the policy. Variables in the path object, can be used in the rule conditions by prefixing them with `$`.
 
-In the last `allow` rule, corresponding to the `/pets/{petId}` path object, the `petId` is a variable in the expression `input.path = ["pets", petId]` whose value will be bound to a value in the `input` that is provided to the policy.
+To see this example, run:
 
-The policy also expects a `token` to be provided in the input to verify the security requirements.
-
+```bash
+$ ./openapi-to-rego examples/petstore-rego-boolean-filter.yaml -p example
+```
 
 ### Generating Field Filter Rules
 
-`openapi-to-rego` leverages the [Extensions Object](https://github.com/OAI/OpenAPI-Specification/blob/master/versions/3.0.0.md#specification-extensions) in the OpenAPI 3.0 specification to generate Rego rules that return collections of values. An extension object named `x-security-rego-field-filter`, can be used to specify the fields that need to be filtered in the client response. 
+An extension object named `x-security-rego-field-filter`, can be used to generate Rego rules that return collections of values. The fields that need to be filtered in the client response can be specified using this extension.
 
 The value for the `x-security-rego-field-filter` field is a list of objects, keyed on the `Security Scheme Name` as declared in the [Security Requirement Object](https://github.com/OAI/OpenAPI-Specification/blob/OpenAPI.next/versions/3.0.0.md#securityRequirementObject). The value for each security scheme is a list of fields that need to be filtered.
 

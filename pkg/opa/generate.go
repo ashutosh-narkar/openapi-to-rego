@@ -19,6 +19,7 @@ var (
 		"lt":         " < ",
 		"gte":        " >= ",
 		"membership": " = ",
+		"negation":   "not ",
 	}
 )
 
@@ -32,7 +33,12 @@ const (
 	// OAS Extension to generate a Rego rule that overwrites value of a field in an object
 	oasSecExtRegoOverwriteFilter = "x-security-rego-overwrite-filter"
 
-	tokenPrefix = "token"
+	// OAS Extension to generate a Rego rule that returns a boolean decision
+	oasSecExtRegoBooleanFilter = "x-security-rego-boolean-filter"
+
+	tokenPrefix        = "token"
+	inputPrefix        = "input"
+	pathTemplatePrefix = "$"
 
 	helperRuleName = "allow"
 )
@@ -40,9 +46,9 @@ const (
 var regoTemplate = `package %s
 default allow = false
 
-token = {"payload": payload} { io.jwt.decode(input.token, [_, payload, _]) }{{range .}}{{ if .MaskFields }}
+token = {"payload": payload} { io.jwt.decode(input.token, [_, payload, _]) }{{range .}}{{ if .FieldFilter }}
 
-filter = {{.MaskFields}} {
+filter = {{.FieldFilter}} {
   input.path = {{.Path}}
   input.method = {{.Method}}
   {{- with .Scopes}}
@@ -50,7 +56,7 @@ filter = {{.MaskFields}} {
   token.payload.scopes["{{.}}"]
   {{- end}}
   {{- end}}
-}{{ end }}{{if .ListFilter}}
+}{{else if .ListFilter}}
 
 list_filter[x] {
   input.path = {{.Path}}
@@ -85,16 +91,20 @@ response["{{.OverwriteFilter.Field}}"] = input.object.{{.OverwriteFilter.Field}}
   {{.}}
 {{- end}}
 }
-{{end}}{{else}}
+{{end}}{{else if .BooleanFilter}} {{$path := .Path}} {{$method := .Method}}
+{{range .BooleanFilter.Expressions}}
+
+allow = true {
+  input.path = {{$path}}
+  input.method = {{$method}}
+{{- range .}}
+  {{.}}
+{{- end}}
+}{{end}}{{else}}
 
 allow = true {
   input.path = {{.Path}}
   input.method = {{.Method}}
-  {{- with .Scopes}}
-  {{- range .}}
-  token.payload.scopes["{{.}}"]
-  {{- end}}
-  {{- end}}
 }{{end}}{{end}}`
 
 // PolicySchema defines the policy to generate
@@ -102,19 +112,20 @@ type PolicySchema struct {
 	Path            string
 	Method          string
 	Scopes          []string
-	MaskFields      string
+	FieldFilter     string
 	ListFilter      *policySchemaListFilter
 	OverwriteFilter *policySchemaOverwriteFilter
+	BooleanFilter   *policySchemaBooleanFilter
 }
 
-// policySchemaListFilter defines the policy to generate for a list filter
+// policySchemaListFilter defines the policy to generate from a list filter
 type policySchemaListFilter struct {
 	Source      string
 	Operations  []operation
 	Expressions []string
 }
 
-// policySchemaOverwriteFilter defines the policy to generate for a overwrite filter
+// policySchemaOverwriteFilter defines the policy to generate from a overwrite filter
 type policySchemaOverwriteFilter struct {
 	Field          string
 	Value          interface{}
@@ -122,6 +133,12 @@ type policySchemaOverwriteFilter struct {
 	Rules          []rule
 	HelperRuleName string
 	Expressions    [][]string
+}
+
+// policySchemaBooleanFilter defines the policy to generate from a boolean filter
+type policySchemaBooleanFilter struct {
+	Rules       []rule
+	Expressions [][]string
 }
 
 type rule struct {
@@ -145,6 +162,7 @@ func Generate(swagger *openapi3.Swagger, packageName string) (string, error) {
 
 				// security requirement object needs to exist as the "x-security-rego-field-filter"
 				// extension references it
+				// TODO: Update the filter to support operations
 				if operation.Security == nil {
 					return "", fmt.Errorf("OpenAPI spec does not specify a Security Requirement Object")
 				}
@@ -171,10 +189,10 @@ func Generate(swagger *openapi3.Swagger, packageName string) (string, error) {
 						}
 
 						schema := PolicySchema{
-							Path:       convertOASPathToParsedPath(path),
-							Method:     strconv.Quote(method),
-							Scopes:     scopes,
-							MaskFields: getFormattedMaskFields(maskFields),
+							Path:        convertOASPathToParsedPath(path),
+							Method:      strconv.Quote(method),
+							Scopes:      scopes,
+							FieldFilter: getFormattedMaskFields(maskFields),
 						}
 						schemas = append(schemas, schema)
 					}
@@ -202,7 +220,9 @@ func Generate(swagger *openapi3.Swagger, packageName string) (string, error) {
 							for _, operand := range operands {
 								switch val := operand.(type) {
 								case string:
-									if !strings.HasPrefix(val, tokenPrefix) {
+									if strings.HasPrefix(val, pathTemplatePrefix) {
+										val = strings.TrimLeft(val, pathTemplatePrefix)
+									} else if !strings.HasPrefix(val, tokenPrefix) && !strings.HasPrefix(val, inputPrefix) {
 										val = fmt.Sprintf("x.%v", val)
 									} else {
 										if op == "membership" {
@@ -260,7 +280,9 @@ func Generate(swagger *openapi3.Swagger, packageName string) (string, error) {
 								for _, operand := range operands {
 									switch val := operand.(type) {
 									case string:
-										if !strings.HasPrefix(val, tokenPrefix) && !strings.HasPrefix(val, "\"") {
+										if strings.HasPrefix(val, pathTemplatePrefix) {
+											val = strings.TrimLeft(val, pathTemplatePrefix)
+										} else if !strings.HasPrefix(val, tokenPrefix) && !strings.HasPrefix(val, "\"") {
 											val = fmt.Sprintf("input.object.%v", val)
 										} else {
 											if op == "membership" {
@@ -305,30 +327,76 @@ func Generate(swagger *openapi3.Swagger, packageName string) (string, error) {
 				}
 			}
 
-			// generate boolean rules
-			if operation.Security == nil {
+			// check for "x-security-rego-boolean-filter" extension
+			if val, ok := operation.ExtensionProps.Extensions[oasSecExtRegoBooleanFilter]; ok {
+				data, ok := val.(json.RawMessage)
+				if !ok {
+					return "", fmt.Errorf("OpenAPI extensions: type assertion error")
+				}
+
+				var policySchemaBooleanFilters []policySchemaBooleanFilter
+				err := json.Unmarshal(data, &policySchemaBooleanFilters)
+				if err != nil {
+					return "", err
+				}
+
+				for _, p := range policySchemaBooleanFilters {
+					ruleExpressions := [][]string{}
+					for _, rule := range p.Rules {
+						expressions := []string{}
+						for _, operation := range rule.Operations {
+							for op, operands := range operation {
+								expression := []string{}
+								for _, operand := range operands {
+									switch val := operand.(type) {
+									case string:
+										if strings.HasPrefix(val, pathTemplatePrefix) {
+											val = strings.TrimLeft(val, pathTemplatePrefix)
+										} else if op == "membership" {
+											val = fmt.Sprintf("%v[_]", val)
+										} else if op == "negation" {
+											val = fmt.Sprintf("not %v", val)
+										}
+										expression = append(expression, val)
+									case bool:
+										expression = append(expression, strconv.FormatBool(val))
+									case int64:
+										expression = append(expression, strconv.FormatInt(val, 10))
+									case float64:
+										expression = append(expression, strconv.FormatInt(int64(val), 10))
+									default:
+										return "", fmt.Errorf("illegal type for operand: %T", val)
+									}
+								}
+								expressions = append(expressions, strings.Join(expression, opNameToSymbol[op]))
+							}
+						}
+						ruleExpressions = append(ruleExpressions, expressions)
+					}
+
+					booleanFilter := policySchemaBooleanFilter{
+						Expressions: ruleExpressions,
+					}
+
+					schema := PolicySchema{
+						Path:          convertOASPathToParsedPath(path),
+						Method:        strconv.Quote(method),
+						BooleanFilter: &booleanFilter,
+					}
+					schemas = append(schemas, schema)
+				}
+			}
+
+			// generate boolean rules if boolean filter not defined
+			if _, ok := operation.ExtensionProps.Extensions[oasSecExtRegoBooleanFilter]; !ok {
 				schema := PolicySchema{
 					Path:   convertOASPathToParsedPath(path),
 					Method: strconv.Quote(method),
 				}
 				schemas = append(schemas, schema)
-			} else {
-				if _, ok := operation.ExtensionProps.Extensions[oasSecExtRegoFieldFilter]; !ok {
-					securitySchemes := getSecuritySchemes(operation.Security)
-					for _, scopes := range securitySchemes {
-						schema := PolicySchema{
-							Path:   convertOASPathToParsedPath(path),
-							Method: strconv.Quote(method),
-							Scopes: scopes,
-						}
-						schemas = append(schemas, schema)
-					}
-				}
 			}
-
 		}
 	}
-
 	return generateRego(schemas, packageName)
 }
 

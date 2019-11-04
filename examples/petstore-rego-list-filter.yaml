@@ -127,6 +127,12 @@ paths:
         - type:apiKey
         - name:api_key
         - in:header
+      x-security-rego-list-filter:
+      - source: list
+        operations:
+        - eq:
+          - $petId
+          - token.payload.petId
 components:
   schemas:
     Pet:
